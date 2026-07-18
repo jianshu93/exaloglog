@@ -15,6 +15,8 @@ pub enum ExaLogLogError {
     InvalidD,
     InvalidP,
     InvalidStateLength,
+    InvalidSerializationHeader,
+    UnsupportedSerializationVersion,
     IncompatibleT,
     OtherHasSmallerD,
     OtherHasSmallerPrecision,
@@ -27,6 +29,10 @@ impl fmt::Display for ExaLogLogError {
             Self::InvalidD => f.write_str("invalid d parameter"),
             Self::InvalidP => f.write_str("invalid precision parameter"),
             Self::InvalidStateLength => f.write_str("unexpected state length"),
+            Self::InvalidSerializationHeader => f.write_str("invalid serialized sketch header"),
+            Self::UnsupportedSerializationVersion => {
+                f.write_str("unsupported serialized sketch version")
+            }
             Self::IncompatibleT => f.write_str("t parameters differ"),
             Self::OtherHasSmallerD => f.write_str("other sketch has smaller d parameter"),
             Self::OtherHasSmallerPrecision => f.write_str("other sketch has smaller precision"),
@@ -35,6 +41,10 @@ impl fmt::Display for ExaLogLogError {
 }
 
 impl Error for ExaLogLogError {}
+
+pub const SERIALIZED_HEADER_LEN: usize = 8;
+const SERIALIZATION_MAGIC: [u8; 4] = *b"ELL\0";
+const SERIALIZATION_VERSION: u8 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExaLogLog {
@@ -93,6 +103,47 @@ impl ExaLogLog {
 
     pub fn into_state(self) -> Vec<u8> {
         self.state
+    }
+
+    pub fn serialized_len(&self) -> usize {
+        SERIALIZED_HEADER_LEN + self.state.len()
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.serialized_len());
+        bytes.extend_from_slice(&SERIALIZATION_MAGIC);
+        bytes.push(SERIALIZATION_VERSION);
+        bytes.push(self.t as u8);
+        bytes.push(self.d as u8);
+        bytes.push(self.p as u8);
+        bytes.extend_from_slice(&self.state);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ExaLogLogError> {
+        if bytes.len() < SERIALIZED_HEADER_LEN {
+            return Err(ExaLogLogError::InvalidStateLength);
+        }
+        if bytes[..4] != SERIALIZATION_MAGIC {
+            return Err(ExaLogLogError::InvalidSerializationHeader);
+        }
+        if bytes[4] != SERIALIZATION_VERSION {
+            return Err(ExaLogLogError::UnsupportedSerializationVersion);
+        }
+
+        let t = u32::from(bytes[5]);
+        let d = u32::from(bytes[6]);
+        let p = u32::from(bytes[7]);
+        check_t(t)?;
+        check_d(d, t)?;
+        check_p(p, t)?;
+
+        let expected_len = SERIALIZED_HEADER_LEN + state_len_bytes(t, d, p);
+        if bytes.len() != expected_len {
+            return Err(ExaLogLogError::InvalidStateLength);
+        }
+
+        Self::wrap(t, d, bytes[SERIALIZED_HEADER_LEN..].to_vec())
     }
 
     pub fn reset(&mut self) -> &mut Self {
@@ -890,6 +941,72 @@ mod tests {
         }
         let estimate = sketch.estimate();
         assert!(estimate > 40_000.0 && estimate < 60_000.0, "{estimate}");
+    }
+
+    #[test]
+    fn serialization_round_trips_state_and_parameters() {
+        for (t, d, p) in [(0, 0, 4), (2, 20, 8), (2, 24, 8), (3, 17, 7)] {
+            let mut sketch = ExaLogLog::new(t, d, p).unwrap();
+            let mut seed = 0x8877_6655_4433_2211 ^ ((t as u64) << 48) ^ ((d as u64) << 32);
+            for _ in 0..10_000 {
+                sketch.add_hash(splitmix64(&mut seed));
+            }
+
+            let bytes = sketch.to_bytes();
+            assert_eq!(bytes.len(), sketch.serialized_len());
+            let restored = ExaLogLog::from_bytes(&bytes).unwrap();
+
+            assert_eq!(restored.t(), sketch.t());
+            assert_eq!(restored.d(), sketch.d());
+            assert_eq!(restored.p(), sketch.p());
+            assert_eq!(restored.state(), sketch.state());
+            assert_eq!(restored.estimate(), sketch.estimate());
+        }
+    }
+
+    #[test]
+    fn serialization_rejects_malformed_bytes() {
+        let mut sketch = ExaLogLog::new(2, 24, 8).unwrap();
+        sketch.add_raw_values(["apple", "banana", "cherry"]);
+        let bytes = sketch.to_bytes();
+
+        assert_eq!(
+            ExaLogLog::from_bytes(&bytes[..SERIALIZED_HEADER_LEN - 1]),
+            Err(ExaLogLogError::InvalidStateLength)
+        );
+
+        let mut bad_magic = bytes.clone();
+        bad_magic[0] = b'X';
+        assert_eq!(
+            ExaLogLog::from_bytes(&bad_magic),
+            Err(ExaLogLogError::InvalidSerializationHeader)
+        );
+
+        let mut bad_version = bytes.clone();
+        bad_version[4] = 0xff;
+        assert_eq!(
+            ExaLogLog::from_bytes(&bad_version),
+            Err(ExaLogLogError::UnsupportedSerializationVersion)
+        );
+
+        let mut bad_t = bytes.clone();
+        bad_t[5] = (MAX_T + 1) as u8;
+        assert_eq!(ExaLogLog::from_bytes(&bad_t), Err(ExaLogLogError::InvalidT));
+
+        let mut bad_d = bytes.clone();
+        bad_d[6] = (max_d(sketch.t()) + 1) as u8;
+        assert_eq!(ExaLogLog::from_bytes(&bad_d), Err(ExaLogLogError::InvalidD));
+
+        let mut bad_p = bytes.clone();
+        bad_p[7] = (max_p(sketch.t()) + 1) as u8;
+        assert_eq!(ExaLogLog::from_bytes(&bad_p), Err(ExaLogLogError::InvalidP));
+
+        let mut truncated = bytes;
+        truncated.pop();
+        assert_eq!(
+            ExaLogLog::from_bytes(&truncated),
+            Err(ExaLogLogError::InvalidStateLength)
+        );
     }
 
     #[test]

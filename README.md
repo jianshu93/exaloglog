@@ -11,6 +11,7 @@ The core crate exposes:
 - 32-bit token support with `compute_token` and `add_token`
 - ML cardinality estimation with bias correction constants
 - merge and downsize operations
+- versioned byte serialization with `to_bytes` and `from_bytes`
 
 ## Input Modes
 
@@ -39,6 +40,23 @@ sketch.add_raw_with_hash_fn(42u64, |value| ExaLogLog::hash_value(value));
 ```
 
 The older `add(u64)` method remains available as a compatibility alias for `add_hash`.
+
+## Serialization
+
+```rust
+use exaloglog::ExaLogLog;
+
+let mut sketch = ExaLogLog::new(2, 24, 12).unwrap();
+sketch.add_raw_values(["apple", "banana", "cherry"]);
+
+let bytes = sketch.to_bytes();
+let restored = ExaLogLog::from_bytes(&bytes).unwrap();
+
+assert_eq!(restored.t(), sketch.t());
+assert_eq!(restored.d(), sketch.d());
+assert_eq!(restored.p(), sketch.p());
+assert_eq!(restored.state(), sketch.state());
+```
 
 Important licensing note: the paper repository's Java code is published under a restrictive illustrative license, not a normal reusable open-source license. This crate is useful as an implementation prototype and benchmark target, but the licensing should be reviewed before publishing or using it beyond local evaluation.
 
