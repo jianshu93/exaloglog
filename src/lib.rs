@@ -36,89 +36,6 @@ impl fmt::Display for ExaLogLogError {
 
 impl Error for ExaLogLogError {}
 
-pub trait StateChangeObserver {
-    fn state_changed(&mut self, probability_decrement: f64);
-}
-
-struct NoopObserver;
-
-impl StateChangeObserver for NoopObserver {
-    fn state_changed(&mut self, _: f64) {}
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MartingaleEstimator {
-    distinct_count_estimate: f64,
-    state_change_probability: f64,
-}
-
-impl Default for MartingaleEstimator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MartingaleEstimator {
-    pub fn new() -> Self {
-        Self {
-            distinct_count_estimate: 0.0,
-            state_change_probability: 1.0,
-        }
-    }
-
-    pub fn from_state(
-        distinct_count_estimate: f64,
-        state_change_probability: f64,
-    ) -> Result<Self, ExaLogLogError> {
-        let mut estimator = Self::new();
-        estimator.set(distinct_count_estimate, state_change_probability)?;
-        Ok(estimator)
-    }
-
-    pub fn reset(&mut self) {
-        self.distinct_count_estimate = 0.0;
-        self.state_change_probability = 1.0;
-    }
-
-    pub fn set(
-        &mut self,
-        distinct_count_estimate: f64,
-        mut state_change_probability: f64,
-    ) -> Result<(), ExaLogLogError> {
-        if distinct_count_estimate < 0.0
-            || !(0.0..=1.0).contains(&state_change_probability)
-            || distinct_count_estimate.is_nan()
-            || state_change_probability.is_nan()
-        {
-            return Err(ExaLogLogError::InvalidStateLength);
-        }
-        if state_change_probability <= 0.0 {
-            state_change_probability = 0.0;
-        }
-        self.distinct_count_estimate = distinct_count_estimate;
-        self.state_change_probability = state_change_probability;
-        Ok(())
-    }
-
-    pub fn distinct_count_estimate(&self) -> f64 {
-        self.distinct_count_estimate
-    }
-
-    pub fn state_change_probability(&self) -> f64 {
-        self.state_change_probability
-    }
-}
-
-impl StateChangeObserver for MartingaleEstimator {
-    fn state_changed(&mut self, probability_decrement: f64) {
-        self.distinct_count_estimate += 1.0 / self.state_change_probability;
-        self.state_change_probability -= probability_decrement;
-        if self.state_change_probability <= 0.0 {
-            self.state_change_probability = 0.0;
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExaLogLog {
     t: u32,
@@ -204,7 +121,31 @@ impl ExaLogLog {
 
     /// Adds an already hashed 64-bit value to this sketch.
     pub fn add_hash(&mut self, hash_value: u64) -> &mut Self {
-        self.add_with_observer::<NoopObserver>(hash_value, None)
+        let mask = ((1u64 << self.t) << self.p) - 1;
+        let idx = ((hash_value & mask) >> self.t) as usize;
+        let nlz = (hash_value | mask).leading_zeros() as u64;
+        let low_mask = (1u64 << self.t) - 1;
+        let k = (nlz << self.t) + (hash_value & low_mask) + 1;
+
+        let r_old = self.get_register(idx);
+        let u = r_old >> self.d;
+        if k > u {
+            let delta = k - u;
+            let mut r_new = k << self.d;
+            if delta <= self.d as u64 {
+                r_new |= ((1u64 << self.d) | (r_old & ((1u64 << self.d) - 1))) >> delta;
+            }
+            self.set_register(idx, r_new);
+        } else if k < u {
+            let delta = u - k;
+            if delta <= self.d as u64 {
+                let r_new = r_old | (1u64 << (self.d as u64 - delta));
+                if r_new != r_old {
+                    self.set_register(idx, r_new);
+                }
+            }
+        }
+        self
     }
 
     /// Adds already hashed 64-bit values to this sketch.
@@ -284,79 +225,8 @@ impl ExaLogLog {
         self
     }
 
-    /// Same as [`Self::add_raw`] but updates a martingale estimator.
-    pub fn add_raw_with_martingale<T: Hash>(
-        &mut self,
-        value: T,
-        martingale_estimator: &mut MartingaleEstimator,
-    ) -> &mut Self {
-        self.add_with_martingale(Self::hash_value(value), martingale_estimator)
-    }
-
-    /// Same as [`Self::add_raw`] but notifies a [`StateChangeObserver`].
-    pub fn add_raw_with_observer<T, O>(&mut self, value: T, observer: Option<&mut O>) -> &mut Self
-    where
-        T: Hash,
-        O: StateChangeObserver,
-    {
-        self.add_with_observer(Self::hash_value(value), observer)
-    }
-
     pub fn add(&mut self, hash_value: u64) -> &mut Self {
         self.add_hash(hash_value)
-    }
-
-    pub fn add_with_martingale(
-        &mut self,
-        hash_value: u64,
-        martingale_estimator: &mut MartingaleEstimator,
-    ) -> &mut Self {
-        self.add_with_observer(hash_value, Some(martingale_estimator))
-    }
-
-    pub fn add_with_observer<O: StateChangeObserver>(
-        &mut self,
-        hash_value: u64,
-        mut observer: Option<&mut O>,
-    ) -> &mut Self {
-        let mask = ((1u64 << self.t) << self.p) - 1;
-        let idx = ((hash_value & mask) >> self.t) as usize;
-        let nlz = (hash_value | mask).leading_zeros() as u64;
-        let low_mask = (1u64 << self.t) - 1;
-        let k = (nlz << self.t) + (hash_value & low_mask) + 1;
-
-        let r_old = self.get_register(idx);
-        let u = r_old >> self.d;
-        if k > u {
-            let delta = k - u;
-            let mut r_new = k << self.d;
-            if delta <= self.d as u64 {
-                r_new |= ((1u64 << self.d) | (r_old & ((1u64 << self.d) - 1))) >> delta;
-            }
-            self.set_register(idx, r_new);
-            if let Some(observer) = observer.as_mut() {
-                let decrement = self
-                    .register_change_probability_scaled(r_old)
-                    .wrapping_sub(self.register_change_probability_scaled(r_new))
-                    as f64
-                    * TWO_POW_MINUS_64;
-                observer.state_changed(decrement);
-            }
-        } else if k < u {
-            let delta = u - k;
-            if delta <= self.d as u64 {
-                let r_new = r_old | (1u64 << (self.d as u64 - delta));
-                if r_new != r_old {
-                    self.set_register(idx, r_new);
-                    if let Some(observer) = observer.as_mut() {
-                        let q = 63_i32 - self.t as i32 - self.p as i32;
-                        let exponent = (q - nlz as i32).max(0) - 64;
-                        observer.state_changed(pow2(exponent));
-                    }
-                }
-            }
-        }
-        self
     }
 
     pub fn compute_token(hash_value: u64) -> u32 {
@@ -367,34 +237,12 @@ impl ExaLogLog {
         self.add(reconstruct_hash(token, V))
     }
 
-    pub fn add_token_with_martingale(
-        &mut self,
-        token: u32,
-        martingale_estimator: &mut MartingaleEstimator,
-    ) -> &mut Self {
-        self.add_with_martingale(reconstruct_hash(token, V), martingale_estimator)
-    }
-
     pub fn estimate(&self) -> f64 {
         self.estimate_with_solver_stats(None)
     }
 
     pub fn get_distinct_count_estimate(&self) -> f64 {
         self.estimate()
-    }
-
-    pub fn state_change_probability(&self) -> f64 {
-        let m = self.num_registers();
-        let first = self.register_change_probability_scaled(self.get_register(0));
-        let mut sum = first;
-        for idx in 1..m {
-            sum = sum.wrapping_add(self.register_change_probability_scaled(self.get_register(idx)));
-        }
-        if sum != 0 || first == 0 {
-            unsigned_long_to_double(sum) * TWO_POW_MINUS_64
-        } else {
-            1.0
-        }
     }
 
     pub fn downsize(&self, d: u32, p: u32) -> Result<Self, ExaLogLogError> {
@@ -544,10 +392,6 @@ impl ExaLogLog {
             let width = self.register_width();
             packed_set(&mut self.state, idx, width, value);
         }
-    }
-
-    fn register_change_probability_scaled(&self, r: u64) -> u64 {
-        contribute(r, None, self.t, self.d, self.p)
     }
 }
 
@@ -1049,21 +893,6 @@ mod tests {
     }
 
     #[test]
-    fn martingale_probability_tracks_sketch() {
-        let mut sketch = ExaLogLog::new(2, 20, 8).unwrap();
-        let mut martingale = MartingaleEstimator::new();
-        let mut seed = 7;
-        for _ in 0..10_000 {
-            sketch.add_with_martingale(splitmix64(&mut seed), &mut martingale);
-        }
-        assert!(
-            (sketch.state_change_probability() - martingale.state_change_probability()).abs()
-                < 1e-12
-        );
-        assert!(martingale.distinct_count_estimate() > 0.0);
-    }
-
-    #[test]
     fn hash_input_api_prehashed_u64_matches_add_alias() {
         let hashes = [
             0x0123_4567_89ab_cdef,
@@ -1269,19 +1098,5 @@ mod tests {
             "tab-hash estimate {:.3} deviates too much from 4",
             est
         );
-    }
-
-    #[test]
-    fn hash_input_api_raw_updates_martingale() {
-        let mut sketch = ExaLogLog::new(2, 24, 8).unwrap();
-        let mut martingale = MartingaleEstimator::new();
-        for value in ["apple", "banana", "cherry", "dragonfruit"] {
-            sketch.add_raw_with_martingale(value, &mut martingale);
-        }
-        assert!(
-            (sketch.state_change_probability() - martingale.state_change_probability()).abs()
-                < 1e-12
-        );
-        assert!(martingale.distinct_count_estimate() > 0.0);
     }
 }
