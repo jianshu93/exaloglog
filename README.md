@@ -69,7 +69,6 @@ assert_eq!(restored.p(), sketch.p());
 assert_eq!(restored.state(), sketch.state());
 ```
 
-Important licensing note: the paper repository's Java code is published under a restrictive illustrative license, not a normal reusable open-source license. This crate is useful as an implementation prototype and benchmark target, but the licensing should be reviewed before publishing or using it beyond local evaluation.
 
 ## Quick check
 
