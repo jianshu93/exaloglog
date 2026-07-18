@@ -11,7 +11,7 @@ The core crate exposes:
 - 32-bit token support with `compute_token` and `add_token`
 - ML cardinality estimation with bias correction constants
 - merge and downsize operations
-- versioned byte serialization with `to_bytes` and `from_bytes`
+- serde-based save/load support behind the `serde` feature
 
 ## Input Modes
 
@@ -43,14 +43,25 @@ The older `add(u64)` method remains available as a compatibility alias for `add_
 
 ## Serialization
 
+Enable the `serde` feature:
+
+```toml
+exaloglog = { path = "/Users/jianshuzhao/Github/exaloglog", features = ["serde"] }
+```
+
 ```rust
 use exaloglog::ExaLogLog;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
 
 let mut sketch = ExaLogLog::new(2, 24, 12).unwrap();
 sketch.add_raw_values(["apple", "banana", "cherry"]);
 
-let bytes = sketch.to_bytes();
-let restored = ExaLogLog::from_bytes(&bytes).unwrap();
+let writer = BufWriter::new(File::create("sketch.bin").unwrap());
+sketch.save(writer).unwrap();
+
+let reader = BufReader::new(File::open("sketch.bin").unwrap());
+let restored = ExaLogLog::load(reader).unwrap();
 
 assert_eq!(restored.t(), sketch.t());
 assert_eq!(restored.d(), sketch.d());

@@ -1,5 +1,7 @@
 mod ml_bias;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -15,8 +17,6 @@ pub enum ExaLogLogError {
     InvalidD,
     InvalidP,
     InvalidStateLength,
-    InvalidSerializationHeader,
-    UnsupportedSerializationVersion,
     IncompatibleT,
     OtherHasSmallerD,
     OtherHasSmallerPrecision,
@@ -29,10 +29,6 @@ impl fmt::Display for ExaLogLogError {
             Self::InvalidD => f.write_str("invalid d parameter"),
             Self::InvalidP => f.write_str("invalid precision parameter"),
             Self::InvalidStateLength => f.write_str("unexpected state length"),
-            Self::InvalidSerializationHeader => f.write_str("invalid serialized sketch header"),
-            Self::UnsupportedSerializationVersion => {
-                f.write_str("unsupported serialized sketch version")
-            }
             Self::IncompatibleT => f.write_str("t parameters differ"),
             Self::OtherHasSmallerD => f.write_str("other sketch has smaller d parameter"),
             Self::OtherHasSmallerPrecision => f.write_str("other sketch has smaller precision"),
@@ -42,10 +38,7 @@ impl fmt::Display for ExaLogLogError {
 
 impl Error for ExaLogLogError {}
 
-pub const SERIALIZED_HEADER_LEN: usize = 8;
-const SERIALIZATION_MAGIC: [u8; 4] = *b"ELL\0";
-const SERIALIZATION_VERSION: u8 = 1;
-
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExaLogLog {
     t: u32,
@@ -103,47 +96,6 @@ impl ExaLogLog {
 
     pub fn into_state(self) -> Vec<u8> {
         self.state
-    }
-
-    pub fn serialized_len(&self) -> usize {
-        SERIALIZED_HEADER_LEN + self.state.len()
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.serialized_len());
-        bytes.extend_from_slice(&SERIALIZATION_MAGIC);
-        bytes.push(SERIALIZATION_VERSION);
-        bytes.push(self.t as u8);
-        bytes.push(self.d as u8);
-        bytes.push(self.p as u8);
-        bytes.extend_from_slice(&self.state);
-        bytes
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ExaLogLogError> {
-        if bytes.len() < SERIALIZED_HEADER_LEN {
-            return Err(ExaLogLogError::InvalidStateLength);
-        }
-        if bytes[..4] != SERIALIZATION_MAGIC {
-            return Err(ExaLogLogError::InvalidSerializationHeader);
-        }
-        if bytes[4] != SERIALIZATION_VERSION {
-            return Err(ExaLogLogError::UnsupportedSerializationVersion);
-        }
-
-        let t = u32::from(bytes[5]);
-        let d = u32::from(bytes[6]);
-        let p = u32::from(bytes[7]);
-        check_t(t)?;
-        check_d(d, t)?;
-        check_p(p, t)?;
-
-        let expected_len = SERIALIZED_HEADER_LEN + state_len_bytes(t, d, p);
-        if bytes.len() != expected_len {
-            return Err(ExaLogLogError::InvalidStateLength);
-        }
-
-        Self::wrap(t, d, bytes[SERIALIZED_HEADER_LEN..].to_vec())
     }
 
     pub fn reset(&mut self) -> &mut Self {
@@ -296,6 +248,26 @@ impl ExaLogLog {
         self.estimate()
     }
 
+    #[cfg(feature = "serde")]
+    /// Serializes this ExaLogLog sketch to a writer using bincode.
+    ///
+    /// The `serde` feature must be enabled.
+    pub fn save<W: std::io::Write>(&self, mut writer: W) -> std::io::Result<()> {
+        bincode::serialize_into(&mut writer, self).map_err(std::io::Error::other)
+    }
+
+    #[cfg(feature = "serde")]
+    /// Loads an ExaLogLog sketch from a bincode reader.
+    ///
+    /// The `serde` feature must be enabled.
+    pub fn load<R: std::io::Read>(mut reader: R) -> std::io::Result<Self> {
+        let sketch: Self = bincode::deserialize_from(&mut reader).map_err(std::io::Error::other)?;
+        sketch.validate().map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+        })?;
+        Ok(sketch)
+    }
+
     pub fn downsize(&self, d: u32, p: u32) -> Result<Self, ExaLogLogError> {
         check_d(d, self.t)?;
         check_p(p, self.t)?;
@@ -443,6 +415,17 @@ impl ExaLogLog {
             let width = self.register_width();
             packed_set(&mut self.state, idx, width, value);
         }
+    }
+
+    #[cfg(feature = "serde")]
+    fn validate(&self) -> Result<(), ExaLogLogError> {
+        check_t(self.t)?;
+        check_d(self.d, self.t)?;
+        check_p(self.p, self.t)?;
+        if self.state.len() != state_len_bytes(self.t, self.d, self.p) {
+            return Err(ExaLogLogError::InvalidStateLength);
+        }
+        Ok(())
     }
 }
 
@@ -943,6 +926,7 @@ mod tests {
         assert!(estimate > 40_000.0 && estimate < 60_000.0, "{estimate}");
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn serialization_round_trips_state_and_parameters() {
         for (t, d, p) in [(0, 0, 4), (2, 20, 8), (2, 24, 8), (3, 17, 7)] {
@@ -952,9 +936,9 @@ mod tests {
                 sketch.add_hash(splitmix64(&mut seed));
             }
 
-            let bytes = sketch.to_bytes();
-            assert_eq!(bytes.len(), sketch.serialized_len());
-            let restored = ExaLogLog::from_bytes(&bytes).unwrap();
+            let mut bytes = Vec::new();
+            sketch.save(&mut bytes).unwrap();
+            let restored = ExaLogLog::load(bytes.as_slice()).unwrap();
 
             assert_eq!(restored.t(), sketch.t());
             assert_eq!(restored.d(), sketch.d());
@@ -964,49 +948,40 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serde")]
     #[test]
-    fn serialization_rejects_malformed_bytes() {
-        let mut sketch = ExaLogLog::new(2, 24, 8).unwrap();
-        sketch.add_raw_values(["apple", "banana", "cherry"]);
-        let bytes = sketch.to_bytes();
+    fn serialization_streams_multiple_sketches() {
+        let mut first = ExaLogLog::new(2, 24, 8).unwrap();
+        first.add_raw_values(["apple", "banana", "cherry"]);
 
-        assert_eq!(
-            ExaLogLog::from_bytes(&bytes[..SERIALIZED_HEADER_LEN - 1]),
-            Err(ExaLogLogError::InvalidStateLength)
-        );
+        let mut second = ExaLogLog::new(2, 20, 8).unwrap();
+        second.add_raw_values(["alpha", "beta", "gamma", "delta"]);
 
-        let mut bad_magic = bytes.clone();
-        bad_magic[0] = b'X';
-        assert_eq!(
-            ExaLogLog::from_bytes(&bad_magic),
-            Err(ExaLogLogError::InvalidSerializationHeader)
-        );
+        let mut bytes = Vec::new();
+        first.save(&mut bytes).unwrap();
+        second.save(&mut bytes).unwrap();
 
-        let mut bad_version = bytes.clone();
-        bad_version[4] = 0xff;
-        assert_eq!(
-            ExaLogLog::from_bytes(&bad_version),
-            Err(ExaLogLogError::UnsupportedSerializationVersion)
-        );
+        let mut reader = bytes.as_slice();
+        let first_loaded = ExaLogLog::load(&mut reader).unwrap();
+        let second_loaded = ExaLogLog::load(&mut reader).unwrap();
 
-        let mut bad_t = bytes.clone();
-        bad_t[5] = (MAX_T + 1) as u8;
-        assert_eq!(ExaLogLog::from_bytes(&bad_t), Err(ExaLogLogError::InvalidT));
+        assert_eq!(first_loaded, first);
+        assert_eq!(second_loaded, second);
+        assert!(reader.is_empty());
+    }
 
-        let mut bad_d = bytes.clone();
-        bad_d[6] = (max_d(sketch.t()) + 1) as u8;
-        assert_eq!(ExaLogLog::from_bytes(&bad_d), Err(ExaLogLogError::InvalidD));
-
-        let mut bad_p = bytes.clone();
-        bad_p[7] = (max_p(sketch.t()) + 1) as u8;
-        assert_eq!(ExaLogLog::from_bytes(&bad_p), Err(ExaLogLogError::InvalidP));
-
-        let mut truncated = bytes;
-        truncated.pop();
-        assert_eq!(
-            ExaLogLog::from_bytes(&truncated),
-            Err(ExaLogLogError::InvalidStateLength)
-        );
+    #[cfg(feature = "serde")]
+    #[test]
+    fn load_rejects_invalid_deserialized_state() {
+        let invalid = ExaLogLog {
+            t: 2,
+            d: 24,
+            p: 8,
+            state: vec![0; 3],
+        };
+        let bytes = bincode::serialize(&invalid).unwrap();
+        let error = ExaLogLog::load(bytes.as_slice()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
