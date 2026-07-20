@@ -1,5 +1,5 @@
 [package]
-name = "exaloglog"
+name = "exaloglog-rs"
 version = "0.1.0"
 edition = "2024"
 description = "Standalone Rust implementation of the ExaLogLog approximate distinct counter"
