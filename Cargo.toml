@@ -2,7 +2,7 @@
 name = "exaloglog"
 version = "0.1.0"
 edition = "2024"
-description = "Standalone Rust implementation prototype of the ExaLogLog approximate distinct counter"
+description = "Standalone Rust implementation of the ExaLogLog approximate distinct counter"
 keywords = ["exaloglog", "cardinality", "sketch", "distinct-count", "probabilistic"]
 categories = ["algorithms", "data-structures"]
 
