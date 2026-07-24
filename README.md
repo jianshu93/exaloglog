@@ -78,7 +78,7 @@ cargo test
 
 ## UltraLogLog comparison
 
-The benchmark harness is kept in `benchmarks/` so the core crate stays standalone. It references the local UltraLogLog checkout at `/Users/jianshuzhao/Github/ultraloglog`.
+The benchmark harness is kept in `benchmarks/` so the core crate stays standalone. It references the local UltraLogLog here: https://github.com/waynexia/ultraloglog.
 
 ```bash
 cargo run --release --manifest-path benchmarks/Cargo.toml

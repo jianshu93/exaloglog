@@ -11,5 +11,5 @@ komihash = "0.4.1"
 polymur-hash = "0.2.2"
 tab-hash = "0.3.0"
 t1ha = "0.1.2"
-ultraloglog = { path = "/Users/jianshuzhao/Github/ultraloglog" }
+ultraloglog = { git = "https://github.com/waynexia/ultraloglog" }
 wyhash = "0.6.0"
